@@ -13,31 +13,42 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    
+    # تعیین پوشه کاری فلاتر
+    defaults:
+      run:
+        working-directory: ./flutter_clicker
 
     steps:
+      # دانلود کدهای ریپازیتوری روی سرور اکشنز
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      # تنظیم نسخه جاوا برای اندروید
       - name: Set up Java
         uses: actions/setup-java@v4
         with:
           distribution: 'zulu'
           java-version: '17'
 
+      # تنظیم محیط فلاتر و فعال‌سازی کش برای افزایش سرعت بیلد بعدی
       - name: Set up Flutter
         uses: subosito/flutter-action@v2
         with:
           channel: 'stable'
           cache: true
 
+      # دریافت وابستگی‌های پروژه
       - name: Install dependencies
         run: flutter pub get
 
+      # بیلد خروجی APK به صورت بهینه و تفکیک شده بر اساس معماری پردازنده‌ها
       - name: Build APK
         run: flutter build apk --release --split-per-abi
 
+      # آپلود فایل‌های نهایی APK ساخته شده جهت دانلود
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
         with:
           name: flutter-clicker-apks
-          path: build/app/outputs/flutter-apk/*.apk
+          path: flutter_clicker/build/app/outputs/flutter-apk/*.apk
