@@ -17,7 +17,7 @@ jobs:
     # تعیین پوشه کاری فلاتر
     defaults:
       run:
-        working-directory: ./flutter_clicker
+        working-directory: ./hon
 
     steps:
       # دانلود کدهای ریپازیتوری روی سرور اکشنز
