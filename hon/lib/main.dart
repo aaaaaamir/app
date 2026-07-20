@@ -70,7 +70,7 @@ class _MainScreenState extends State<MainScreen> {
   
   WebSocket? _webSocket;
   Timer? _pollingTimer;
-  int64 _lastMessageTimestamp = 0;
+  int _lastMessageTimestamp = 0;
 
   @override
   void initState() {
