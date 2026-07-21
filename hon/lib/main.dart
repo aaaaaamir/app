@@ -39,17 +39,11 @@ class AppLogger {
 
 // ============================ AppConfig ============================
 class AppConfig {
-  static const String _encodedUrl = "aHR0cHM6Ly9maW4ucnVuZmxhcmUucnVu";
+  // آدرس HTTP (برای درخواست‌های REST) - بدون پورت، از پیش‌فرض HTTPS استفاده می‌کند
+  static const String httpBaseUrl = "https://fin.runflare.run";
 
-  static String get httpBaseUrl {
-    return utf8.decode(base64.decode(_encodedUrl));
-  }
-
-  // Socket.IO URL با پورت 8080 (طبق درخواست)
-  static String get socketUrl {
-    final uri = Uri.parse(httpBaseUrl);
-    return uri.replace(port: 8080).toString();
-  }
+  // آدرس Socket.IO با پورت ۸۰۸۰ (صریح و اجباری)
+  static const String socketUrl = "https://fin.runflare.run:8080";
 }
 
 // ============================ Main ============================
@@ -174,11 +168,13 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
       _socket = IO.io(
         socketUrl,
         IO.OptionBuilder()
-            .setTransports(['polling', 'websocket'])
+            .setTransports(['websocket', 'polling']) // اول websocket سپس polling
             .disableAutoConnect()
             .setReconnectionAttempts(5)
             .setReconnectionDelay(2000)
             .setReconnectionDelayMax(5000)
+            // در صورت نیاز هدرهای اضافی (مثلاً برای CORS)
+            // .setExtraHeaders({'Origin': 'https://your-app-origin.com'})
             .build(),
       );
 
