@@ -42,8 +42,8 @@ class AppConfig {
   // آدرس HTTP (برای درخواست‌های REST)
   static const String httpBaseUrl = "https://fin.runflare.run";
 
-  // آدرس Socket.IO
-  static const String socketUrl = "https://fin.runflare.run";
+  // آدرس Socket.IO (اضافه شدن پورت 443 جهت جلوگیری از ایجاد باگ پورت 0)
+  static const String socketUrl = "https://fin.runflare.run:443";
 }
 
 // ============================ Main ============================
@@ -168,7 +168,7 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
       _socket = IO.io(
         socketUrl,
         IO.OptionBuilder()
-            .setTransports(['polling', 'websocket']) // شروع با polling جهت سازگاری کامل
+            .setTransports(['websocket', 'polling']) // اولویت اول websocket جهت سرعت و اتصال پایدار
             .disableAutoConnect()
             .setReconnectionAttempts(5)
             .setReconnectionDelay(2000)
@@ -182,7 +182,7 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
         AppLogger.log('✅ Socket connected! ID: ${_socket!.id}');
         setState(() => isConnected = true);
         
-        // 🔹 اصلاح شده: ارسال مستقیم username بدون کروشه
+        // ارسال مستقیم username بدون کروشه
         _socket!.emit('register', currentUsername);
         AppLogger.log('📤 Emitted register event for $currentUsername');
         _fetchUsersList();
@@ -429,7 +429,7 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
 
     AppLogger.log('📤 Emitting chat_message: $msgData');
     
-    // 🔹 اصلاح شده: ارسال مستقیم Map بدون کروشه
+    // ارسال مستقیم Map بدون کروشه
     _socket?.emit('chat_message', msgData);
 
     setState(() {
