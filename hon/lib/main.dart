@@ -39,10 +39,10 @@ class AppLogger {
 
 // ============================ AppConfig ============================
 class AppConfig {
-  // آدرس HTTP (برای درخواست‌های REST) - بدون پورت، از پیش‌فرض HTTPS استفاده می‌کند
+  // آدرس HTTP (برای درخواست‌های REST)
   static const String httpBaseUrl = "https://fin.runflare.run";
 
-  // آدرس Socket.IO با پورت ۸۰۸۰ (صریح و اجباری)
+  // آدرس Socket.IO
   static const String socketUrl = "https://fin.runflare.run";
 }
 
@@ -168,13 +168,11 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
       _socket = IO.io(
         socketUrl,
         IO.OptionBuilder()
-            .setTransports(['websocket', 'polling']) // اول websocket سپس polling
+            .setTransports(['polling', 'websocket']) // شروع با polling جهت سازگاری کامل
             .disableAutoConnect()
             .setReconnectionAttempts(5)
             .setReconnectionDelay(2000)
             .setReconnectionDelayMax(5000)
-            // در صورت نیاز هدرهای اضافی (مثلاً برای CORS)
-            // .setExtraHeaders({'Origin': 'https://your-app-origin.com'})
             .build(),
       );
 
@@ -183,8 +181,10 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
       _socket!.onConnect((_) {
         AppLogger.log('✅ Socket connected! ID: ${_socket!.id}');
         setState(() => isConnected = true);
-        _socket!.emit('register', [currentUsername, _lastMessageTimestamp]);
-        AppLogger.log('📤 Emitted register event for $currentUsername with timestamp $_lastMessageTimestamp');
+        
+        // 🔹 اصلاح شده: ارسال مستقیم username بدون کروشه
+        _socket!.emit('register', currentUsername);
+        AppLogger.log('📤 Emitted register event for $currentUsername');
         _fetchUsersList();
       });
 
@@ -428,7 +428,9 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
     };
 
     AppLogger.log('📤 Emitting chat_message: $msgData');
-    _socket?.emit('chat_message', [msgData]);
+    
+    // 🔹 اصلاح شده: ارسال مستقیم Map بدون کروشه
+    _socket?.emit('chat_message', msgData);
 
     setState(() {
       messages.add(msgData);
