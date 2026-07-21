@@ -12,15 +12,29 @@ class AppLogger {
   static final List<String> _logs = [];
   static bool _enabled = false;
 
-  static void enable() {
+  static bool get isEnabled => _enabled;
+
+  /// مقداردهی اولیه و خواندن وضعیت لاگ‌گیری از حافظه
+  static Future<void> init() async {
+    SharedPreferences prefs = await SharedPreferences.getInstance();
+    _enabled = prefs.getBool('is_logging_enabled') ?? false;
+    if (_enabled) {
+      log('📋 Logger initialized (ENABLED from previous session)');
+    }
+  }
+
+  static Future<void> enable() async {
     _enabled = true;
-    _logs.clear();
+    SharedPreferences prefs = await SharedPreferences.getInstance();
+    await prefs.setBool('is_logging_enabled', true);
     log('📋 Logger enabled');
   }
 
-  static void disable() {
-    _enabled = false;
+  static Future<void> disable() async {
     log('📋 Logger disabled');
+    _enabled = false;
+    SharedPreferences prefs = await SharedPreferences.getInstance();
+    await prefs.setBool('is_logging_enabled', false);
   }
 
   static void log(String message) {
@@ -42,13 +56,14 @@ class AppConfig {
   // آدرس HTTP (برای درخواست‌های REST)
   static const String httpBaseUrl = "https://fin.runflare.run";
 
-  // آدرس Socket.IO (اضافه شدن پورت 443 جهت جلوگیری از ایجاد باگ پورت 0)
-  static const String socketUrl = "https://fin.runflare.run:443";
+  // آدرس Socket.IO (بدون پورت صریح جهت جلوگیری از ایجاد باگ پورت 0)
+  static const String socketUrl = "https://fin.runflare.run";
 }
 
 // ============================ Main ============================
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  await AppLogger.init(); // بارگیری وضعیت ذخیره‌شده لاگ‌گیری
   AppLogger.log('🚀 App started');
   SharedPreferences prefs = await SharedPreferences.getInstance();
   String? savedUser = prefs.getString('username');
@@ -111,7 +126,8 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    AppLogger.log('📱 MainScreen initState');
+    _isLoggingEnabled = AppLogger.isEnabled; // همگام‌سازی وضعیت لاگ‌گیری
+    AppLogger.log('📱 MainScreen initState | Logging status: $_isLoggingEnabled');
     if (widget.initialUser != null) {
       AppLogger.log('👤 Found saved user: ${widget.initialUser}');
       currentUsername = widget.initialUser;
@@ -168,13 +184,19 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
       _socket = IO.io(
         socketUrl,
         IO.OptionBuilder()
-            .setTransports(['websocket', 'polling']) // اولویت اول websocket جهت سرعت و اتصال پایدار
+            .setTransports(['websocket', 'polling'])
             .disableAutoConnect()
+            .enableLogging() // فعال‌سازی لاگ‌های داخلی کتابخانه Socket.IO
             .setReconnectionAttempts(5)
             .setReconnectionDelay(2000)
             .setReconnectionDelayMax(5000)
             .build(),
       );
+
+      // ثبت تمامی رویدادهای Socket.IO در AppLogger
+      _socket!.onAny((event, data) {
+        AppLogger.log('🌐 [Socket.IO Event] "$event" -> $data');
+      });
 
       AppLogger.log('📡 Socket instance created, connecting...');
 
@@ -182,7 +204,6 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
         AppLogger.log('✅ Socket connected! ID: ${_socket!.id}');
         setState(() => isConnected = true);
         
-        // ارسال مستقیم username بدون کروشه
         _socket!.emit('register', currentUsername);
         AppLogger.log('📤 Emitted register event for $currentUsername');
         _fetchUsersList();
@@ -428,8 +449,6 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
     };
 
     AppLogger.log('📤 Emitting chat_message: $msgData');
-    
-    // ارسال مستقیم Map بدون کروشه
     _socket?.emit('chat_message', msgData);
 
     setState(() {
@@ -447,24 +466,22 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
     );
   }
 
-  // -------------------- Logging Toggle with Long Press --------------------
+  // -------------------- Logging Toggle with Long Press (10 Sec) --------------------
   void _startLoggingHold() {
-    AppLogger.log('🕒 Long press started on logout button');
+    AppLogger.log('🕒 Long press started on log button');
     _loggingHoldTimer?.cancel();
-    _loggingHoldTimer = Timer(const Duration(seconds: 10), () {
+    _loggingHoldTimer = Timer(const Duration(seconds: 10), () async {
       AppLogger.log('⏰ 10 seconds hold reached! Toggling logging mode.');
+      if (AppLogger.isEnabled) {
+        String logs = AppLogger.getLogs();
+        await Clipboard.setData(ClipboardData(text: logs));
+        AppLogger.log('📋 Logs copied to clipboard (${logs.length} chars)');
+        await AppLogger.disable();
+      } else {
+        await AppLogger.enable();
+      }
       setState(() {
-        _isLoggingEnabled = !_isLoggingEnabled;
-        if (_isLoggingEnabled) {
-          AppLogger.enable();
-          AppLogger.log('📋 Logging ENABLED (auto-copy on next long press)');
-        } else {
-          String logs = AppLogger.getLogs();
-          Clipboard.setData(ClipboardData(text: logs));
-          AppLogger.log('📋 Logs copied to clipboard (${logs.length} chars)');
-          AppLogger.disable();
-          AppLogger.log('📋 Logging DISABLED');
-        }
+        _isLoggingEnabled = AppLogger.isEnabled;
         _isLoggingHoldActive = false;
       });
     });
@@ -483,21 +500,10 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
     });
   }
 
-  // -------------------- Logout --------------------
-  void _logout() async {
-    AppLogger.log('🚪 Logging out user: $currentUsername');
-    SharedPreferences prefs = await SharedPreferences.getInstance();
-    await prefs.clear();
-    _usersPollTimer?.cancel();
-    _socket?.dispose();
-    _socket = null;
-    setState(() {
-      currentUsername = null;
-      isConnected = false;
-      messages.clear();
-      activeChatUser = "";
-    });
-    AppLogger.log('✅ Logout complete');
+  // -------------------- Exit Application (App Tap Action) --------------------
+  void _exitApp() {
+    AppLogger.log('🚪 User tapped exit button -> Closing app');
+    SystemNavigator.pop(); // خروج از برنامه بدون خروج از حساب
   }
 
   // -------------------- Build --------------------
@@ -507,7 +513,7 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
       AppLogger.log('🖥️ Building auth view');
       return _buildAuthView();
     }
-    AppLogger.log('🖥️ Building main view, activeChatUser: "${activeChatUser}"');
+    AppLogger.log('🖥️ Building main view, activeChatUser: "$activeChatUser"');
     return activeChatUser.isEmpty ? _buildUserListView() : _buildChatRoomView();
   }
 
@@ -572,7 +578,8 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
                 style: TextStyle(color: Colors.orange, fontSize: 12, fontWeight: FontWeight.bold)),
         actions: [
           GestureDetector(
-            onLongPressStart: (_) => _startLoggingHold(),
+            onTap: _exitApp, // ضربه زدن: خروج از برنامه
+            onLongPressStart: (_) => _startLoggingHold(), // نگه داشتن ۱۰ ثانیه: لاگ‌گیری
             onLongPressEnd: (_) => _cancelLoggingHold(),
             onLongPressCancel: _cancelLoggingHold,
             child: AnimatedContainer(
@@ -582,12 +589,12 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
               decoration: BoxDecoration(
                 color: _isLoggingHoldActive
                     ? (_isLoggingEnabled ? Colors.red : Colors.orange)
-                    : Colors.transparent,
+                    : (_isLoggingEnabled ? Colors.green.withOpacity(0.3) : Colors.transparent),
                 borderRadius: BorderRadius.circular(8),
                 border: Border.all(
                   color: _isLoggingHoldActive
                       ? (_isLoggingEnabled ? Colors.red : Colors.orange)
-                      : Colors.grey,
+                      : (_isLoggingEnabled ? Colors.green : Colors.grey),
                   width: 2,
                 ),
               ),
@@ -595,8 +602,10 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   Icon(
-                    Icons.logout,
-                    color: _isLoggingHoldActive ? Colors.white : Colors.grey,
+                    Icons.exit_to_app,
+                    color: _isLoggingHoldActive
+                        ? Colors.white
+                        : (_isLoggingEnabled ? Colors.green : Colors.grey),
                     size: 24,
                   ),
                   if (_isLoggingHoldActive)
