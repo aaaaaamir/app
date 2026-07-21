@@ -1,22 +1,18 @@
 import 'dart:convert';
 import 'dart:async';
-import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:http/http.dart' as http;
+import 'package:socket_io_client/socket_io_client.dart' as IO;
 
 // کلاس مدیریت امن سکرت‌ها - آدرس به صورت BASE64 ذخیره شده تا در دیکامپایل متنی لو نرود.
 class AppConfig {
   // مقدار زیر در اصل رمزگذاری شده آدرس سرور شماست (مثلاً http://YOUR-PAS-IP:8080)
   // برای تغییر، آدرس سرور خود را Base64 کنید و اینجا قرار دهید.
-  static const String _encodedUrl = "aHR0cHM6Ly9maW4ucnVuZmxhcmUucnVu"; 
+  static const String _encodedUrl = "aHR0cHM6Ly9maW4ucnVuZmxhcmUucnVu";
 
   static String get httpBaseUrl {
     return utf8.decode(base64.decode(_encodedUrl));
-  }
-
-  static String get wsBaseUrl {
-    return httpBaseUrl.replaceFirst("http", "ws");
   }
 }
 
@@ -55,8 +51,8 @@ class MainScreen extends StatefulWidget {
 class _MainScreenState extends State<MainScreen> {
   String? currentUsername;
   bool isLoginMode = true;
-  bool isLongPollingMode = false;
-  
+  bool isConnected = false; // وضعیت اتصال Socket.IO (websocket یا polling، فرقی نمیکنه)
+
   // کنترلرهای ورودی
   final TextEditingController _userController = TextEditingController();
   final TextEditingController _passController = TextEditingController();
@@ -67,9 +63,8 @@ class _MainScreenState extends State<MainScreen> {
   List<dynamic> filteredUsers = [];
   List<Map<String, dynamic>> messages = [];
   String activeChatUser = "";
-  
-  WebSocket? _webSocket;
-  Timer? _pollingTimer;
+
+  IO.Socket? _socket;
   int _lastMessageTimestamp = 0;
 
   @override
@@ -83,76 +78,85 @@ class _MainScreenState extends State<MainScreen> {
 
   @override
   void dispose() {
-    _webSocket?.close();
-    _pollingTimer?.cancel();
+    _socket?.dispose();
     super.dispose();
   }
 
-  // --- مدیریت شبکه و سوییچ خودکار بین وب‌سوکت و لانگ‌پولینگ ---
+  // --- مدیریت اتصال Socket.IO ---
+  // نکته مهم: خود Socket.IO به‌صورت داخلی بین polling و websocket سوییچ
+  // میکنه و reconnect خودکار داره؛ دیگه نیازی به تایمر و state machine
+  // دستی (مثل قبل) نیست.
 
   void _startConnectionManagers() {
-    _connectWebSocket();
+    _connectSocket();
     _fetchUsersList();
-    // بروزرسانی لیست کاربران هر ۱۰ ثانیه
     Timer.periodic(const Duration(seconds: 10), (t) => _fetchUsersList());
   }
 
-  void _connectWebSocket() async {
+  void _connectSocket() {
     if (currentUsername == null) return;
-    _pollingTimer?.cancel();
 
-    try {
-      final wsUrl = "${AppConfig.wsBaseUrl}/api/ws?username=$currentUsername";
-      _webSocket = await WebSocket.connect(wsUrl).timeout(const Duration(seconds: 4));
-      
-      setState(() {
-        isLongPollingMode = false;
-      });
+    // اگه سوکت قبلی وجود داره (مثلاً دوباره لاگین شده)، اول کاملاً پاکش میکنیم
+    _socket?.dispose();
 
-      _webSocket!.listen(
-        (data) {
-          var msg = json.decode(data);
-          _handleIncomingMessage(msg);
-        },
-        onError: (err) => _switchToLongPolling(),
-        onDone: () => _switchToLongPolling(),
-      );
-    } catch (e) {
-      _switchToLongPolling();
-    }
-  }
+    _socket = IO.io(
+      AppConfig.httpBaseUrl,
+      IO.OptionBuilder()
+          .setTransports(['polling', 'websocket']) // با polling شروع کن، اگه شد آپگرید کن به websocket
+          .disableAutoConnect()
+          .setReconnectionDelay(2000)
+          .setReconnectionDelayMax(5000)
+          .build(),
+    );
 
-  void _switchToLongPolling() {
-    if (isLongPollingMode) return;
-    setState(() {
-      isLongPollingMode = true;
+    _socket!.onConnect((_) {
+      setState(() => isConnected = true);
+      // بلافاصله بعد از اتصال، خودمون رو به سرور معرفی میکنیم
+      // و آخرین timestamp دریافتی رو میفرستیم تا پیام‌های ازدست‌رفته برگردن
+      _socket!.emit('register', [currentUsername, _lastMessageTimestamp]);
     });
-    _webSocket?.close();
 
-    // اجرای پولینگ متوالی هر ۵ ثانیه یک‌بار بر اساس ساختار درخواستی
-    _pollingTimer = Timer.periodic(const Duration(seconds: 5), (timer) async {
-      try {
-        final response = await http.get(Uri.parse(
-          "${AppConfig.httpBaseUrl}/api/poll?username=$currentUsername&last_time=$_lastMessageTimestamp"
-        )).timeout(const Duration(seconds: 3));
-
-        if (response.statusCode == 200) {
-          List<dynamic> newMsgs = json.decode(response.body);
-          for (var m in newMsgs) {
-            _handleIncomingMessage(m);
-          }
+    _socket!.on('history', (data) {
+      if (data is List) {
+        for (var m in data) {
+          _handleIncomingMessage(Map<String, dynamic>.from(m as Map));
         }
-      } catch (e) {
-        // در صورت خطای کامل شبکه، سیستم صبورانه تکرار می‌کند
       }
     });
+
+    _socket!.on('chat_message', (data) {
+      _handleIncomingMessage(Map<String, dynamic>.from(data as Map));
+    });
+
+    _socket!.onDisconnect((_) {
+      setState(() => isConnected = false);
+    });
+
+    _socket!.onConnectError((err) {
+      setState(() => isConnected = false);
+    });
+
+    _socket!.onError((err) {
+      setState(() => isConnected = false);
+    });
+
+    _socket!.connect();
   }
 
   void _handleIncomingMessage(Map<String, dynamic> msg) {
-    if (msg['timestamp'] > _lastMessageTimestamp) {
-      _lastMessageTimestamp = msg['timestamp'];
+    // از تکراری‌شدن پیام جلوگیری میکنیم (مثلاً اگه history و realtime هم‌پوشانی داشته باشن)
+    final bool alreadyExists = messages.any((m) =>
+        m['from'] == msg['from'] &&
+        m['to'] == msg['to'] &&
+        m['timestamp'] == msg['timestamp']);
+    if (alreadyExists) return;
+
+    final ts = msg['timestamp'];
+    final int tsInt = ts is int ? ts : (ts as num).toInt();
+    if (tsInt > _lastMessageTimestamp) {
+      _lastMessageTimestamp = tsInt;
     }
-    
+
     setState(() {
       messages.add(msg);
     });
@@ -230,15 +234,9 @@ class _MainScreenState extends State<MainScreen> {
       "timestamp": DateTime.now().millisecondsSinceEpoch
     };
 
-    if (!isLongPollingMode && _webSocket != null) {
-      _webSocket!.add(json.encode(msgData));
-    } else {
-      // در حالت لانگ‌پولینگ، ارسال از طریق متد معمولی انجام می‌شود اما دریافت با پولینگ است
-      http.post(
-        Uri.parse("${AppConfig.httpBaseUrl}/api/ws?username=$currentUsername"),
-        body: json.encode(msgData),
-      );
-    }
+    // توجه: دیگه پیام از سرور برای خودمون echo نمیشه، پس این‌جا فقط
+    // یک‌بار لوکال اضافه‌اش میکنیم و دیگه دوتا نمیشه.
+    _socket?.emit('chat_message', [msgData]);
 
     setState(() {
       messages.add(msgData);
@@ -248,6 +246,19 @@ class _MainScreenState extends State<MainScreen> {
 
   void _showError(String msg) {
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg), backgroundColor: Colors.red));
+  }
+
+  void _logout() async {
+    SharedPreferences prefs = await SharedPreferences.getInstance();
+    await prefs.clear();
+    _socket?.dispose();
+    _socket = null;
+    setState(() {
+      currentUsername = null;
+      isConnected = false;
+      messages.clear();
+      activeChatUser = "";
+    });
   }
 
   // --- مدیریت رابط کاربری یکپارچه (UI Views) ---
@@ -275,7 +286,7 @@ class _MainScreenState extends State<MainScreen> {
               child: Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  Text(isLoginMode ? "ورود به حساب" : "ثبت نام کاربر جدید", 
+                  Text(isLoginMode ? "ورود به حساب" : "ثبت نام کاربر جدید",
                       style: const TextStyle(fontSize: 22, fontWeight: FontWeight.bold, color: Colors.blueAccent)),
                   const SizedBox(height: 20),
                   TextField(
@@ -311,18 +322,14 @@ class _MainScreenState extends State<MainScreen> {
   Widget _buildUserListView() {
     return Scaffold(
       appBar: AppBar(
-        title: isLongPollingMode 
-            ? const Text("حالت اتصال سخت فعال شد (این حالت اینترنت بیشتری مصرف میکند)", 
-                style: TextStyle(color: Colors.red, fontSize: 11, fontWeight: FontWeight.bold))
-            : const Text("هون"),
+        title: isConnected
+            ? const Text("هون")
+            : const Text("در حال اتصال...",
+                style: TextStyle(color: Colors.orange, fontSize: 12, fontWeight: FontWeight.bold)),
         actions: [
           IconButton(
             icon: const Icon(Icons.logout),
-            onPressed: () async {
-              SharedPreferences prefs = await SharedPreferences.getInstance();
-              prefs.clear();
-              setState(() { currentUsername = null; });
-            },
+            onPressed: _logout,
           )
         ],
       ),
@@ -351,7 +358,7 @@ class _MainScreenState extends State<MainScreen> {
                     child: Text(user['username'][0].toString().toUpperCase()),
                   ),
                   title: Text(user['username']),
-                  subtitle: Text(user['is_online'] ? "آنلاین" : "آفلاین", 
+                  subtitle: Text(user['is_online'] ? "آنلاین" : "آفلاین",
                       style: TextStyle(color: user['is_online'] ? Colors.green : Colors.grey)),
                   onTap: () => setState(() => activeChatUser = user['username']),
                 );
@@ -365,8 +372,8 @@ class _MainScreenState extends State<MainScreen> {
 
   // ۳. محیط چت روم اختصاصی داخل صفحه
   Widget _buildChatRoomView() {
-    var chatMessages = messages.where((m) => 
-      (m['from'] == currentUsername && m['to'] == activeChatUser) || 
+    var chatMessages = messages.where((m) =>
+      (m['from'] == currentUsername && m['to'] == activeChatUser) ||
       (m['from'] == activeChatUser && m['to'] == currentUsername)
     ).toList();
 
