@@ -186,7 +186,6 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
         IO.OptionBuilder()
             .setTransports(['websocket', 'polling'])
             .disableAutoConnect()
-            .enableLogging() // فعال‌سازی لاگ‌های داخلی کتابخانه Socket.IO
             .setReconnectionAttempts(5)
             .setReconnectionDelay(2000)
             .setReconnectionDelayMax(5000)
