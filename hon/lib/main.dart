@@ -83,12 +83,18 @@ class _MainScreenState extends State<MainScreen> {
     super.dispose();
   }
 
-  void _startConnectionManagers() {
+  void _startConnectionManagers() async {
     print("🚀 شروع مدیریت اتصالات...");
+
+    // بازیابی آخرین timestamp پیام از حافظه
+    SharedPreferences prefs = await SharedPreferences.getInstance();
+    _lastMessageTimestamp = prefs.getInt('lastMessageTimestamp') ?? 0;
+    print("📊 آخرین timestamp بازیابی شد: $_lastMessageTimestamp");
+
     _connectSocket();
     _fetchUsersList();
     _usersPollTimer?.cancel();
-    _usersPollTimer = Timer.periodic(const Duration(seconds: 10), (t) => _fetchUsersList());
+    _usersPollTimer = Timer.periodic(const Duration(seconds: 5), (t) => _fetchUsersList());
   }
 
   void _connectSocket() {
@@ -104,7 +110,7 @@ class _MainScreenState extends State<MainScreen> {
       _socket = IO.io(
         AppConfig.httpBaseUrl,
         IO.OptionBuilder()
-            .setTransports(['websocket'])
+            .setTransports(['polling', 'websocket'])
             .disableAutoConnect()
             .setReconnectionDelay(2000)
             .setReconnectionDelayMax(5000)
@@ -115,20 +121,80 @@ class _MainScreenState extends State<MainScreen> {
         print("✅ سوکت با موفقیت وصل شد! ID: ${_socket!.id}");
         setState(() => isConnected = true);
         _socket!.emit('register', [currentUsername, _lastMessageTimestamp]);
+        // بلافاصله لیست کاربران رو بروز کن تا وضعیت آنلاین درست نمایش داده بشه
+        _fetchUsersList();
       });
 
       _socket!.on('history', (data) {
         print("📜 دریافت تاریخچه پیام‌ها...");
-        if (data is List) {
-          for (var m in data) {
-            _handleIncomingMessage(Map<String, dynamic>.from(m as Map));
+        try {
+          List<dynamic> msgList;
+          if (data is List) {
+            // بررسی double-wrap: اگر data[0] خودش لیست باشه
+            if (data.isNotEmpty && data[0] is List) {
+              msgList = data[0] as List<dynamic>;
+            } else {
+              msgList = data;
+            }
+          } else {
+            return;
           }
+          for (var m in msgList) {
+            if (m is Map) {
+              _handleIncomingMessage(Map<String, dynamic>.from(m));
+            }
+          }
+        } catch (e) {
+          print("❌ خطا در پردازش تاریخچه: $e");
         }
       });
 
       _socket!.on('chat_message', (data) {
-        print("💬 پیام جدید دریافت شد.");
-        _handleIncomingMessage(Map<String, dynamic>.from(data as Map));
+        print("💬 پیام جدید دریافت شد. raw=$data");
+        try {
+          Map<String, dynamic> msgMap;
+          if (data is Map) {
+            msgMap = Map<String, dynamic>.from(data);
+          } else if (data is List && data.isNotEmpty && data[0] is Map) {
+            msgMap = Map<String, dynamic>.from(data[0] as Map);
+          } else {
+            print("⚠️ فرمت پیام ناشناخته: ${data.runtimeType}");
+            return;
+          }
+          _handleIncomingMessage(msgMap);
+        } catch (e) {
+          print("❌ خطا در پردازش پیام: $e");
+        }
+      });
+
+      _socket!.on('user_status_change', (data) {
+        print("🔄 تغییر وضعیت کاربر: $data");
+        try {
+          Map<String, dynamic> statusData;
+          if (data is Map) {
+            statusData = Map<String, dynamic>.from(data);
+          } else if (data is List && data.isNotEmpty && data[0] is Map) {
+            statusData = Map<String, dynamic>.from(data[0] as Map);
+          } else {
+            return;
+          }
+          final username = statusData['username'] as String?;
+          final isOnline = statusData['is_online'] as bool?;
+          if (username == null || isOnline == null) return;
+
+          setState(() {
+            final idx = allUsers.indexWhere((u) => u['username'] == username);
+            if (idx >= 0) {
+              allUsers[idx]['is_online'] = isOnline;
+              // بروزرسانی لیست فیلتر شده هم
+              filteredUsers = List.from(allUsers.where((u) =>
+                u['username'].toString().toLowerCase().contains(_searchController.text.toLowerCase())
+              ));
+            }
+          });
+        } catch (e) {
+          print("❌ خطا در پردازش user_status_change: $e");
+        }
       });
 
       _socket!.onDisconnect((_) {
@@ -164,6 +230,10 @@ class _MainScreenState extends State<MainScreen> {
     final int tsInt = ts is int ? ts : (ts as num).toInt();
     if (tsInt > _lastMessageTimestamp) {
       _lastMessageTimestamp = tsInt;
+      // ذخیره در حافظه برای جلوگیری از تکرار بعد از ری‌استارت
+      SharedPreferences.getInstance().then((prefs) {
+        prefs.setInt('lastMessageTimestamp', tsInt);
+      });
     }
 
     setState(() {
