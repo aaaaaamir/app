@@ -66,6 +66,7 @@ class _MainScreenState extends State<MainScreen> {
 
   IO.Socket? _socket;
   int _lastMessageTimestamp = 0;
+  Timer? _usersPollTimer;
 
   @override
   void initState() {
@@ -78,6 +79,7 @@ class _MainScreenState extends State<MainScreen> {
 
   @override
   void dispose() {
+    _usersPollTimer?.cancel();
     _socket?.dispose();
     super.dispose();
   }
@@ -90,7 +92,8 @@ class _MainScreenState extends State<MainScreen> {
   void _startConnectionManagers() {
     _connectSocket();
     _fetchUsersList();
-    Timer.periodic(const Duration(seconds: 10), (t) => _fetchUsersList());
+    _usersPollTimer?.cancel();
+    _usersPollTimer = Timer.periodic(const Duration(seconds: 10), (t) => _fetchUsersList());
   }
 
   void _connectSocket() {
@@ -102,7 +105,12 @@ class _MainScreenState extends State<MainScreen> {
     _socket = IO.io(
       AppConfig.httpBaseUrl,
       IO.OptionBuilder()
-          .setTransports(['polling', 'websocket']) // با polling شروع کن، اگه شد آپگرید کن به websocket
+          // نکته مهم: کتابخانه سمت سرور (doquangtan/socketio) فقط از ترنسپورت
+          // websocket پشتیبانی میکنه و polling رو اصلاً پیاده‌سازی نکرده.
+          // اگه اینجا 'polling' هم توی لیست باشه، کلاینت اول سعی میکنه با
+          // polling هندشیک کنه، سرور جوابی که کلاینت انتظار داره رو نمیده،
+          // و اتصال برای همیشه روی «در حال اتصال...» گیر میکنه.
+          .setTransports(['websocket'])
           .disableAutoConnect()
           .setReconnectionDelay(2000)
           .setReconnectionDelayMax(5000)
@@ -251,6 +259,7 @@ class _MainScreenState extends State<MainScreen> {
   void _logout() async {
     SharedPreferences prefs = await SharedPreferences.getInstance();
     await prefs.clear();
+    _usersPollTimer?.cancel();
     _socket?.dispose();
     _socket = null;
     setState(() {
