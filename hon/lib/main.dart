@@ -43,7 +43,7 @@ class AppConfig {
   static const String httpBaseUrl = "https://fin.runflare.run";
 
   // آدرس Socket.IO با پورت ۸۰۸۰ (صریح و اجباری)
-  static const String socketUrl = "https://fin.runflare.run:8080";
+  static const String socketUrl = "https://fin.runflare.run";
 }
 
 // ============================ Main ============================
