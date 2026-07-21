@@ -5,10 +5,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:http/http.dart' as http;
 import 'package:socket_io_client/socket_io_client.dart' as IO;
 
-// کلاس مدیریت امن سکرت‌ها - آدرس به صورت BASE64 ذخیره شده تا در دیکامپایل متنی لو نرود.
 class AppConfig {
-  // مقدار زیر در اصل رمزگذاری شده آدرس سرور شماست (مثلاً http://YOUR-PAS-IP:8080)
-  // برای تغییر، آدرس سرور خود را Base64 کنید و اینجا قرار دهید.
   static const String _encodedUrl = "aHR0cHM6Ly9maW4ucnVuZmxhcmUucnVu";
 
   static String get httpBaseUrl {
@@ -51,9 +48,8 @@ class MainScreen extends StatefulWidget {
 class _MainScreenState extends State<MainScreen> {
   String? currentUsername;
   bool isLoginMode = true;
-  bool isConnected = false; // وضعیت اتصال Socket.IO (websocket یا polling، فرقی نمیکنه)
+  bool isConnected = false;
 
-  // کنترلرهای ورودی
   final TextEditingController _userController = TextEditingController();
   final TextEditingController _passController = TextEditingController();
   final TextEditingController _searchController = TextEditingController();
@@ -72,8 +68,11 @@ class _MainScreenState extends State<MainScreen> {
   void initState() {
     super.initState();
     if (widget.initialUser != null) {
+      print("👤 کاربر در حافظه ذخیره شده پیدا شد: ${widget.initialUser}");
       currentUsername = widget.initialUser;
       _startConnectionManagers();
+    } else {
+      print("👤 کاربری ذخیره نشده. صفحه ورود نمایش داده می‌شود.");
     }
   }
 
@@ -84,12 +83,8 @@ class _MainScreenState extends State<MainScreen> {
     super.dispose();
   }
 
-  // --- مدیریت اتصال Socket.IO ---
-  // نکته مهم: خود Socket.IO به‌صورت داخلی بین polling و websocket سوییچ
-  // میکنه و reconnect خودکار داره؛ دیگه نیازی به تایمر و state machine
-  // دستی (مثل قبل) نیست.
-
   void _startConnectionManagers() {
+    print("🚀 شروع مدیریت اتصالات...");
     _connectSocket();
     _fetchUsersList();
     _usersPollTimer?.cancel();
@@ -97,62 +92,68 @@ class _MainScreenState extends State<MainScreen> {
   }
 
   void _connectSocket() {
-    if (currentUsername == null) return;
+    if (currentUsername == null) {
+      print("⚠️ عدم اتصال سوکت: currentUsername خالی است!");
+      return;
+    }
 
-    // اگه سوکت قبلی وجود داره (مثلاً دوباره لاگین شده)، اول کاملاً پاکش میکنیم
+    print("🔗 تلاش برای ساخت سوکت به آدرس: ${AppConfig.httpBaseUrl}");
     _socket?.dispose();
 
-    _socket = IO.io(
-      AppConfig.httpBaseUrl,
-      IO.OptionBuilder()
-          // نکته مهم: کتابخانه سمت سرور (doquangtan/socketio) فقط از ترنسپورت
-          // websocket پشتیبانی میکنه و polling رو اصلاً پیاده‌سازی نکرده.
-          // اگه اینجا 'polling' هم توی لیست باشه، کلاینت اول سعی میکنه با
-          // polling هندشیک کنه، سرور جوابی که کلاینت انتظار داره رو نمیده،
-          // و اتصال برای همیشه روی «در حال اتصال...» گیر میکنه.
-          .setTransports(['websocket'])
-          .disableAutoConnect()
-          .setReconnectionDelay(2000)
-          .setReconnectionDelayMax(5000)
-          .build(),
-    );
+    try {
+      _socket = IO.io(
+        AppConfig.httpBaseUrl,
+        IO.OptionBuilder()
+            .setTransports(['websocket'])
+            .disableAutoConnect()
+            .setReconnectionDelay(2000)
+            .setReconnectionDelayMax(5000)
+            .build(),
+      );
 
-    _socket!.onConnect((_) {
-      setState(() => isConnected = true);
-      // بلافاصله بعد از اتصال، خودمون رو به سرور معرفی میکنیم
-      // و آخرین timestamp دریافتی رو میفرستیم تا پیام‌های ازدست‌رفته برگردن
-      _socket!.emit('register', [currentUsername, _lastMessageTimestamp]);
-    });
+      _socket!.onConnect((_) {
+        print("✅ سوکت با موفقیت وصل شد! ID: ${_socket!.id}");
+        setState(() => isConnected = true);
+        _socket!.emit('register', [currentUsername, _lastMessageTimestamp]);
+      });
 
-    _socket!.on('history', (data) {
-      if (data is List) {
-        for (var m in data) {
-          _handleIncomingMessage(Map<String, dynamic>.from(m as Map));
+      _socket!.on('history', (data) {
+        print("📜 دریافت تاریخچه پیام‌ها...");
+        if (data is List) {
+          for (var m in data) {
+            _handleIncomingMessage(Map<String, dynamic>.from(m as Map));
+          }
         }
-      }
-    });
+      });
 
-    _socket!.on('chat_message', (data) {
-      _handleIncomingMessage(Map<String, dynamic>.from(data as Map));
-    });
+      _socket!.on('chat_message', (data) {
+        print("💬 پیام جدید دریافت شد.");
+        _handleIncomingMessage(Map<String, dynamic>.from(data as Map));
+      });
 
-    _socket!.onDisconnect((_) {
-      setState(() => isConnected = false);
-    });
+      _socket!.onDisconnect((_) {
+        print("🔌 سوکت قطع شد.");
+        setState(() => isConnected = false);
+      });
 
-    _socket!.onConnectError((err) {
-      setState(() => isConnected = false);
-    });
+      _socket!.onConnectError((err) {
+        print("❌ خطای اتصال (ConnectError): $err");
+        setState(() => isConnected = false);
+      });
 
-    _socket!.onError((err) {
-      setState(() => isConnected = false);
-    });
+      _socket!.onError((err) {
+        print("❌ خطای سوکت (Error): $err");
+        setState(() => isConnected = false);
+      });
 
-    _socket!.connect();
+      print("📲 درخواست اتصال (connect) فرستاده شد...");
+      _socket!.connect();
+    } catch (e) {
+      print("🚨 خطای بحرانی هنگام ساخت سوکت: $e");
+    }
   }
 
   void _handleIncomingMessage(Map<String, dynamic> msg) {
-    // از تکراری‌شدن پیام جلوگیری میکنیم (مثلاً اگه history و realtime هم‌پوشانی داشته باشن)
     final bool alreadyExists = messages.any((m) =>
         m['from'] == msg['from'] &&
         m['to'] == msg['to'] &&
@@ -169,7 +170,6 @@ class _MainScreenState extends State<MainScreen> {
       messages.add(msg);
     });
 
-    // اعلان درون‌برنامه‌ای سریع در صورت باز نبودن چت با شخص فرستنده
     if (msg['from'] != activeChatUser && msg['from'] != currentUsername) {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
@@ -180,8 +180,6 @@ class _MainScreenState extends State<MainScreen> {
     }
   }
 
-  // --- بخش درخواست‌های HTTP احراز هویت ---
-
   void _authAction() async {
     String user = _userController.text.trim();
     String pass = _passController.text.trim();
@@ -189,10 +187,16 @@ class _MainScreenState extends State<MainScreen> {
 
     String endpoint = isLoginMode ? "/api/login" : "/api/signup";
     try {
+      print("🌐 ارسال درخواست HTTP به: ${AppConfig.httpBaseUrl}$endpoint");
+      
+      // 👈🔧 مشکل اصلی اینجا بود: هدر JSON اضافه نشده بود!
       final res = await http.post(
         Uri.parse("${AppConfig.httpBaseUrl}$endpoint"),
+        headers: {"Content-Type": "application/json"},
         body: json.encode({"username": user, "password": pass}),
       );
+
+      print("🌐 پاسخ سرور: کد ${res.statusCode} - بدنه: ${res.body}");
 
       if (res.statusCode == 200 || res.statusCode == 201) {
         SharedPreferences prefs = await SharedPreferences.getInstance();
@@ -205,6 +209,7 @@ class _MainScreenState extends State<MainScreen> {
         _showError(isLoginMode ? "نام کاربری یا رمز عبور اشتباه است" : "نام کاربری از قبل استفاده شده است");
       }
     } catch (e) {
+      print("🚨 خطای شبکه/HTTP: $e");
       _showError("خطا در اتصال به سرور");
     }
   }
@@ -242,8 +247,6 @@ class _MainScreenState extends State<MainScreen> {
       "timestamp": DateTime.now().millisecondsSinceEpoch
     };
 
-    // توجه: دیگه پیام از سرور برای خودمون echo نمیشه، پس این‌جا فقط
-    // یک‌بار لوکال اضافه‌اش میکنیم و دیگه دوتا نمیشه.
     _socket?.emit('chat_message', [msgData]);
 
     setState(() {
@@ -270,8 +273,6 @@ class _MainScreenState extends State<MainScreen> {
     });
   }
 
-  // --- مدیریت رابط کاربری یکپارچه (UI Views) ---
-
   @override
   Widget build(BuildContext context) {
     if (currentUsername == null) {
@@ -280,7 +281,7 @@ class _MainScreenState extends State<MainScreen> {
     return activeChatUser.isEmpty ? _buildUserListView() : _buildChatRoomView();
   }
 
-  // ۱. صفحه ورود و ثبت نام شیک و یکپارچه
+  // UI بخش‌ها دقیقاً مثل قبل هستند
   Widget _buildAuthView() {
     return Scaffold(
       body: Center(
@@ -327,7 +328,6 @@ class _MainScreenState extends State<MainScreen> {
     );
   }
 
-  // ۲. صفحه لیست کاربران و فیلتر جستجو با ID
   Widget _buildUserListView() {
     return Scaffold(
       appBar: AppBar(
@@ -379,7 +379,6 @@ class _MainScreenState extends State<MainScreen> {
     );
   }
 
-  // ۳. محیط چت روم اختصاصی داخل صفحه
   Widget _buildChatRoomView() {
     var chatMessages = messages.where((m) =>
       (m['from'] == currentUsername && m['to'] == activeChatUser) ||
