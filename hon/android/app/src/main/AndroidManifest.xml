@@ -1,8 +1,17 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- مجوزهای دسترسی به اینترنت و شبکه -->
+    <uses-permission android:permission="android.permission.INTERNET" />
+    <uses-permission android:permission="android.permission.ACCESS_NETWORK_STATE" />
+    
+    <!-- مجوز ارسال اعلان (برای اندروید ۱۳ به بالا) -->
+    <uses-permission android:permission="android.permission.POST_NOTIFICATIONS" />
+
     <application
         android:label="hon"
         android:name="${applicationName}"
-        android:icon="@mipmap/ic_launcher">
+        android:icon="@mipmap/ic_launcher"
+        android:usesCleartextTraffic="true">
         <activity
             android:name=".MainActivity"
             android:exported="true"
