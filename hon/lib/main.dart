@@ -29,7 +29,7 @@ class AppLogger {
     if (_enabled) {
       _logs.add(formatted);
     }
-    print(formatted); // always print to console
+    print(formatted);
   }
 
   static String getLogs() => _logs.join('\n');
@@ -41,15 +41,13 @@ class AppLogger {
 class AppConfig {
   static const String _encodedUrl = "aHR0cHM6Ly9maW4ucnVuZmxhcmUucnVu";
 
-  // Base URL for HTTP requests (no port, uses default HTTPS 443)
   static String get httpBaseUrl {
     return utf8.decode(base64.decode(_encodedUrl));
   }
 
-  // Socket.IO URL with explicit port 8080 (as per server configuration)
+  // Socket.IO URL با پورت 8080 (طبق درخواست)
   static String get socketUrl {
     final uri = Uri.parse(httpBaseUrl);
-    // Replace port with 8080, keeping scheme and host
     return uri.replace(port: 8080).toString();
   }
 }
@@ -176,7 +174,7 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
       _socket = IO.io(
         socketUrl,
         IO.OptionBuilder()
-            .setTransports(['websocket', 'polling']) // try websocket first
+            .setTransports(['polling', 'websocket'])
             .disableAutoConnect()
             .setReconnectionAttempts(5)
             .setReconnectionDelay(2000)
@@ -463,7 +461,6 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
           AppLogger.enable();
           AppLogger.log('📋 Logging ENABLED (auto-copy on next long press)');
         } else {
-          // Copy logs to clipboard and disable
           String logs = AppLogger.getLogs();
           Clipboard.setData(ClipboardData(text: logs));
           AppLogger.log('📋 Logs copied to clipboard (${logs.length} chars)');
@@ -576,7 +573,6 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
             : const Text("در حال اتصال...",
                 style: TextStyle(color: Colors.orange, fontSize: 12, fontWeight: FontWeight.bold)),
         actions: [
-          // Custom logout button with long press for logging
           GestureDetector(
             onLongPressStart: (_) => _startLoggingHold(),
             onLongPressEnd: (_) => _cancelLoggingHold(),
