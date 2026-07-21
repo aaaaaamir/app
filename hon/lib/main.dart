@@ -41,8 +41,16 @@ class AppLogger {
 class AppConfig {
   static const String _encodedUrl = "aHR0cHM6Ly9maW4ucnVuZmxhcmUucnVu";
 
+  // Base URL for HTTP requests (no port, uses default HTTPS 443)
   static String get httpBaseUrl {
     return utf8.decode(base64.decode(_encodedUrl));
+  }
+
+  // Socket.IO URL with explicit port 8080 (as per server configuration)
+  static String get socketUrl {
+    final uri = Uri.parse(httpBaseUrl);
+    // Replace port with 8080, keeping scheme and host
+    return uri.replace(port: 8080).toString();
   }
 }
 
@@ -160,15 +168,17 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
       return;
     }
 
-    AppLogger.log('🔗 Attempting socket connection to: ${AppConfig.httpBaseUrl}');
+    final socketUrl = AppConfig.socketUrl;
+    AppLogger.log('🔗 Attempting socket connection to: $socketUrl');
     _socket?.dispose();
 
     try {
       _socket = IO.io(
-        AppConfig.httpBaseUrl,
+        socketUrl,
         IO.OptionBuilder()
-            .setTransports(['polling', 'websocket'])
+            .setTransports(['websocket', 'polling']) // try websocket first
             .disableAutoConnect()
+            .setReconnectionAttempts(5)
             .setReconnectionDelay(2000)
             .setReconnectionDelayMax(5000)
             .build(),
@@ -274,6 +284,9 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
 
       _socket!.onConnectError((err) {
         AppLogger.log('❌ Socket connect error: $err');
+        if (err is Map) {
+          AppLogger.log('Error details: ${err.toString()}');
+        }
         setState(() => isConnected = false);
       });
 
