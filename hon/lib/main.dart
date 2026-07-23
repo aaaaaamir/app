@@ -230,7 +230,7 @@ class _AuthScreenState extends State<AuthScreen> {
 // ==================== صفحه اصلی (لیست چت‌ها و گروه‌ها) ====================
 class MainChatScreen extends StatefulWidget {
   final String currentUsername;
-  const MainChatScreen({super.key, required.this.currentUsername});
+  const MainChatScreen({super.key, required this.currentUsername});
 
   @override
   State<MainChatScreen> createState() => _MainChatScreenState();
@@ -614,10 +614,10 @@ class ChatRoomScreen extends StatefulWidget {
 
   const ChatRoomScreen({
     super.key,
-    required.this.currentUsername,
+    required this.currentUsername,
     this.peerUsername,
     this.groupId,
-    required.this.title,
+    required this.title,
     this.onNewMessageSent,
   });
 
