@@ -1,662 +1,564 @@
 import 'dart:async';
 import 'dart:convert';
-import 'dart:io';
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
-import 'package:shared_preferences/shared_preferences.dart';
 import 'package:http/http.dart' as http;
-import 'package:socket_io_client/socket_io_client.dart' as IO;
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:web_socket_channel/web_socket_channel.dart';
+import 'package:intl/intl.dart' as intl;
 
-// ============================ Logger ============================
-class AppLogger {
-  static final List<String> _logs = [];
-  static bool _enabled = false;
-
-  static bool get isEnabled => _enabled;
-
-  /// مقداردهی اولیه و خواندن وضعیت لاگ‌گیری از حافظه
-  static Future<void> init() async {
-    SharedPreferences prefs = await SharedPreferences.getInstance();
-    _enabled = prefs.getBool('is_logging_enabled') ?? false;
-    if (_enabled) {
-      log('📋 Logger initialized (ENABLED from previous session)');
-    }
-  }
-
-  static Future<void> enable() async {
-    _enabled = true;
-    SharedPreferences prefs = await SharedPreferences.getInstance();
-    await prefs.setBool('is_logging_enabled', true);
-    log('📋 Logger enabled');
-  }
-
-  static Future<void> disable() async {
-    log('📋 Logger disabled');
-    _enabled = false;
-    SharedPreferences prefs = await SharedPreferences.getInstance();
-    await prefs.setBool('is_logging_enabled', false);
-  }
-
-  static void log(String message) {
-    final timestamp = DateTime.now().toIso8601String();
-    final formatted = '[$timestamp] $message';
-    if (_enabled) {
-      _logs.add(formatted);
-    }
-    print(formatted);
-  }
-
-  static String getLogs() => _logs.join('\n');
-
-  static void clear() => _logs.clear();
+void main() {
+  runApp(const MyApp());
 }
 
-// ============================ AppConfig ============================
-class AppConfig {
-  // آدرس HTTP (برای درخواست‌های REST)
-  static const String httpBaseUrl = "https://fin.runflare.run";
-
-  // آدرس Socket.IO (بدون پورت صریح جهت جلوگیری از ایجاد باگ پورت 0)
-  static const String socketUrl = "https://fin.runflare.run";
-}
-
-// ============================ Main ============================
-void main() async {
-  WidgetsFlutterBinding.ensureInitialized();
-  await AppLogger.init(); // بارگیری وضعیت ذخیره‌شده لاگ‌گیری
-  AppLogger.log('🚀 App started');
-  SharedPreferences prefs = await SharedPreferences.getInstance();
-  String? savedUser = prefs.getString('username');
-  AppLogger.log('👤 Saved username: $savedUser');
-  runApp(MyApp(savedUsername: savedUser));
-}
+const String baseUrl = "https://fin.runflare.run";
+const String wsUrl = "wss://fin.runflare.run/ws";
 
 class MyApp extends StatelessWidget {
-  final String? savedUsername;
-  const MyApp({super.key, this.savedUsername});
+  const MyApp({super.key});
 
   @override
   Widget build(BuildContext context) {
-    AppLogger.log('🏗️ Building MyApp');
     return MaterialApp(
+      title: 'چت',
       debugShowCheckedModeBanner: false,
+      builder: (context, child) {
+        return Directionality(
+          textDirection: TextDirection.rtl,
+          child: child!,
+        );
+      },
       theme: ThemeData.dark().copyWith(
-        primaryColor: Colors.blueAccent,
-        scaffoldBackgroundColor: const Color(0xFF121212),
+        scaffoldBackgroundColor: const Color(0xFF0E0E0E),
+        cardColor: const Color(0xFF1C1C1C),
+        colorScheme: const ColorScheme.dark(
+          primary: Color(0xFF4F8CFF),
+          surface: Color(0xFF1C1C1C),
+        ),
       ),
-      home: MainScreen(initialUser: savedUsername),
+      home: const AuthCheckScreen(),
     );
   }
 }
 
-// ============================ MainScreen ============================
-class MainScreen extends StatefulWidget {
-  final String? initialUser;
-  const MainScreen({super.key, this.initialUser});
+class AuthCheckScreen extends StatefulWidget {
+  const AuthCheckScreen({super.key});
 
   @override
-  State<MainScreen> createState() => _MainScreenState();
+  State<AuthCheckScreen> createState() => _AuthCheckScreenState();
 }
 
-class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
-  // -------------------- State Variables --------------------
-  String? currentUsername;
-  bool isLoginMode = true;
-  bool isConnected = false;
-  bool _isLoggingEnabled = false;
-  Timer? _loggingHoldTimer;
-  bool _isLoggingHoldActive = false;
-
-  final TextEditingController _userController = TextEditingController();
-  final TextEditingController _passController = TextEditingController();
-  final TextEditingController _searchController = TextEditingController();
-  final TextEditingController _msgController = TextEditingController();
-
-  List<dynamic> allUsers = [];
-  List<dynamic> filteredUsers = [];
-  List<Map<String, dynamic>> messages = [];
-  String activeChatUser = "";
-
-  IO.Socket? _socket;
-  int _lastMessageTimestamp = 0;
-  Timer? _usersPollTimer;
-
-  // -------------------- Lifecycle --------------------
+class _AuthCheckScreenState extends State<AuthCheckScreen> {
   @override
   void initState() {
     super.initState();
-    WidgetsBinding.instance.addObserver(this);
-    _isLoggingEnabled = AppLogger.isEnabled; // همگام‌سازی وضعیت لاگ‌گیری
-    AppLogger.log('📱 MainScreen initState | Logging status: $_isLoggingEnabled');
-    if (widget.initialUser != null) {
-      AppLogger.log('👤 Found saved user: ${widget.initialUser}');
-      currentUsername = widget.initialUser;
-      _startConnectionManagers();
-    } else {
-      AppLogger.log('👤 No saved user, showing auth screen');
-    }
+    _checkAuth();
   }
 
-  @override
-  void dispose() {
-    WidgetsBinding.instance.removeObserver(this);
-    _usersPollTimer?.cancel();
-    _socket?.dispose();
-    _loggingHoldTimer?.cancel();
-    AppLogger.log('🧹 MainScreen disposed');
-    super.dispose();
-  }
-
-  @override
-  void didChangeAppLifecycleState(AppLifecycleState state) {
-    AppLogger.log('🔄 Lifecycle state: $state');
-    super.didChangeAppLifecycleState(state);
-  }
-
-  // -------------------- Connection Managers --------------------
-  void _startConnectionManagers() async {
-    AppLogger.log('🚀 Starting connection managers for user: $currentUsername');
-    SharedPreferences prefs = await SharedPreferences.getInstance();
-    _lastMessageTimestamp = prefs.getInt('lastMessageTimestamp') ?? 0;
-    AppLogger.log('📊 Last message timestamp: $_lastMessageTimestamp');
-
-    _connectSocket();
-    _fetchUsersList();
-    _usersPollTimer?.cancel();
-    _usersPollTimer = Timer.periodic(const Duration(seconds: 5), (t) {
-      AppLogger.log('⏱️ Polling users list (timer)');
-      _fetchUsersList();
-    });
-  }
-
-  // -------------------- Socket --------------------
-  void _connectSocket() {
-    if (currentUsername == null) {
-      AppLogger.log('⚠️ Cannot connect socket: currentUsername is null');
-      return;
-    }
-
-    final socketUrl = AppConfig.socketUrl;
-    AppLogger.log('🔗 Attempting socket connection to: $socketUrl');
-    _socket?.dispose();
-
-    try {
-      _socket = IO.io(
-        socketUrl,
-        IO.OptionBuilder()
-            .setTransports(['websocket', 'polling'])
-            .disableAutoConnect()
-            .setReconnectionAttempts(5)
-            .setReconnectionDelay(2000)
-            .setReconnectionDelayMax(5000)
-            .build(),
-      );
-
-      // ثبت تمامی رویدادهای Socket.IO در AppLogger
-      _socket!.onAny((event, data) {
-        AppLogger.log('🌐 [Socket.IO Event] "$event" -> $data');
-      });
-
-      AppLogger.log('📡 Socket instance created, connecting...');
-
-      _socket!.onConnect((_) {
-        AppLogger.log('✅ Socket connected! ID: ${_socket!.id}');
-        setState(() => isConnected = true);
-        
-        _socket!.emit('register', currentUsername);
-        AppLogger.log('📤 Emitted register event for $currentUsername');
-        _fetchUsersList();
-      });
-
-      _socket!.on('history', (data) {
-        AppLogger.log('📜 Received history: $data');
-        try {
-          List<dynamic> msgList;
-          if (data is List) {
-            if (data.isNotEmpty && data[0] is List) {
-              msgList = data[0] as List<dynamic>;
-              AppLogger.log('📦 History is double-wrapped, extracting inner list');
-            } else {
-              msgList = data;
-            }
-          } else {
-            AppLogger.log('⚠️ History data is not a List, ignoring');
-            return;
-          }
-          AppLogger.log('📋 Processing ${msgList.length} history messages');
-          for (var m in msgList) {
-            if (m is Map) {
-              _handleIncomingMessage(Map<String, dynamic>.from(m));
-            }
-          }
-        } catch (e, stack) {
-          AppLogger.log('❌ Error processing history: $e\n$stack');
-        }
-      });
-
-      _socket!.on('chat_message', (data) {
-        AppLogger.log('💬 Received chat_message raw: $data');
-        try {
-          Map<String, dynamic> msgMap;
-          if (data is Map) {
-            msgMap = Map<String, dynamic>.from(data);
-          } else if (data is List && data.isNotEmpty && data[0] is Map) {
-            msgMap = Map<String, dynamic>.from(data[0] as Map);
-            AppLogger.log('📦 Message is wrapped in list, extracting first element');
-          } else {
-            AppLogger.log('⚠️ Unknown message format: ${data.runtimeType}');
-            return;
-          }
-          _handleIncomingMessage(msgMap);
-        } catch (e, stack) {
-          AppLogger.log('❌ Error processing chat_message: $e\n$stack');
-        }
-      });
-
-      _socket!.on('user_status_change', (data) {
-        AppLogger.log('🔄 user_status_change received: $data');
-        try {
-          Map<String, dynamic> statusData;
-          if (data is Map) {
-            statusData = Map<String, dynamic>.from(data);
-          } else if (data is List && data.isNotEmpty && data[0] is Map) {
-            statusData = Map<String, dynamic>.from(data[0] as Map);
-            AppLogger.log('📦 Status data wrapped in list, extracting first element');
-          } else {
-            AppLogger.log('⚠️ Unknown status format: ${data.runtimeType}');
-            return;
-          }
-          final username = statusData['username'] as String?;
-          final isOnline = statusData['is_online'] as bool?;
-          if (username == null || isOnline == null) {
-            AppLogger.log('⚠️ Missing username or is_online in status data');
-            return;
-          }
-
-          AppLogger.log('🔄 User $username is ${isOnline ? "online" : "offline"}');
-          setState(() {
-            final idx = allUsers.indexWhere((u) => u['username'] == username);
-            if (idx >= 0) {
-              allUsers[idx]['is_online'] = isOnline;
-              filteredUsers = List.from(allUsers.where((u) =>
-                  u['username'].toString().toLowerCase().contains(_searchController.text.toLowerCase())
-              ));
-              AppLogger.log('✅ Updated user $username status in lists');
-            } else {
-              AppLogger.log('⚠️ User $username not found in allUsers');
-            }
-          });
-        } catch (e, stack) {
-          AppLogger.log('❌ Error processing user_status_change: $e\n$stack');
-        }
-      });
-
-      _socket!.onDisconnect((_) {
-        AppLogger.log('🔌 Socket disconnected');
-        setState(() => isConnected = false);
-      });
-
-      _socket!.onConnectError((err) {
-        AppLogger.log('❌ Socket connect error: $err');
-        if (err is Map) {
-          AppLogger.log('Error details: ${err.toString()}');
-        }
-        setState(() => isConnected = false);
-      });
-
-      _socket!.onError((err) {
-        AppLogger.log('❌ Socket error: $err');
-        setState(() => isConnected = false);
-      });
-
-      AppLogger.log('📲 Calling socket.connect()');
-      _socket!.connect();
-    } catch (e, stack) {
-      AppLogger.log('🚨 Critical error while creating socket: $e\n$stack');
-    }
-  }
-
-  // -------------------- Incoming Message Handler --------------------
-  void _handleIncomingMessage(Map<String, dynamic> msg) {
-    AppLogger.log('📩 Handling incoming message: $msg');
-    final bool alreadyExists = messages.any((m) =>
-        m['from'] == msg['from'] &&
-        m['to'] == msg['to'] &&
-        m['timestamp'] == msg['timestamp']);
-    if (alreadyExists) {
-      AppLogger.log('⏭️ Message already exists, skipping');
-      return;
-    }
-
-    final ts = msg['timestamp'];
-    final int tsInt = ts is int ? ts : (ts as num).toInt();
-    if (tsInt > _lastMessageTimestamp) {
-      _lastMessageTimestamp = tsInt;
-      SharedPreferences.getInstance().then((prefs) {
-        prefs.setInt('lastMessageTimestamp', tsInt);
-        AppLogger.log('💾 Saved lastMessageTimestamp: $tsInt');
-      });
-    }
-
-    setState(() {
-      messages.add(msg);
-    });
-    AppLogger.log('✅ Message added to local list');
-
-    if (msg['from'] != activeChatUser && msg['from'] != currentUsername) {
-      AppLogger.log('🔔 New message from ${msg['from']}, showing snackbar');
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text("پیام جدید از طرف ${msg['from']}: ${msg['text']}"),
-          backgroundColor: Colors.blueAccent,
-        ),
-      );
-    }
-  }
-
-  // -------------------- Authentication --------------------
-  void _authAction() async {
-    String user = _userController.text.trim();
-    String pass = _passController.text.trim();
-    AppLogger.log('🔐 Auth action: mode=${isLoginMode ? "login" : "signup"}, user=$user');
-
-    if (user.isEmpty || pass.isEmpty) {
-      AppLogger.log('⚠️ Username or password empty');
-      return;
-    }
-
-    String endpoint = isLoginMode ? "/api/login" : "/api/signup";
-    try {
-      AppLogger.log('🌐 Sending HTTP request to ${AppConfig.httpBaseUrl}$endpoint');
-      final res = await http.post(
-        Uri.parse("${AppConfig.httpBaseUrl}$endpoint"),
-        headers: {"Content-Type": "application/json"},
-        body: json.encode({"username": user, "password": pass}),
-      );
-
-      AppLogger.log('🌐 Response status: ${res.statusCode}, body: ${res.body}');
-
-      if (res.statusCode == 200 || res.statusCode == 201) {
-        AppLogger.log('✅ Auth successful for $user');
-        SharedPreferences prefs = await SharedPreferences.getInstance();
-        await prefs.setString('username', user);
-        setState(() {
-          currentUsername = user;
-        });
-        _startConnectionManagers();
+  Future<void> _checkAuth() async {
+    final prefs = await SharedPreferences.getInstance();
+    final username = prefs.getString('username');
+    if (mounted) {
+      if (username != null && username.isNotEmpty) {
+        Navigator.pushReplacement(
+          context,
+          MaterialPageRoute(builder: (_) => MainChatScreen(currentUsername: username)),
+        );
       } else {
-        String errMsg = isLoginMode ? "نام کاربری یا رمز عبور اشتباه است" : "نام کاربری از قبل استفاده شده است";
-        AppLogger.log('❌ Auth failed: $errMsg');
-        _showError(errMsg);
+        Navigator.pushReplacement(
+          context,
+          MaterialPageRoute(builder: (_) => const AuthScreen()),
+        );
       }
-    } catch (e, stack) {
-      AppLogger.log('🚨 Network/HTTP error: $e\n$stack');
-      _showError("خطا در اتصال به سرور");
     }
   }
 
-  // -------------------- Fetch Users --------------------
-  void _fetchUsersList() async {
-    if (currentUsername == null) {
-      AppLogger.log('⚠️ Cannot fetch users: currentUsername is null');
-      return;
-    }
-    AppLogger.log('📋 Fetching users list from ${AppConfig.httpBaseUrl}/api/users');
-    try {
-      final res = await http.get(Uri.parse("${AppConfig.httpBaseUrl}/api/users"));
-      if (res.statusCode == 200) {
-        AppLogger.log('✅ Users list fetched successfully');
-        setState(() {
-          allUsers = json.decode(res.body);
-          allUsers.removeWhere((u) => u['username'] == currentUsername);
-          filteredUsers = List.from(allUsers);
-          AppLogger.log('👥 Users count: ${allUsers.length} (excluding self)');
-        });
-      } else {
-        AppLogger.log('⚠️ Failed to fetch users: status ${res.statusCode}');
-      }
-    } catch (e, stack) {
-      AppLogger.log('❌ Error fetching users: $e\n$stack');
-    }
-  }
-
-  // -------------------- Search --------------------
-  void _searchUser(String query) {
-    AppLogger.log('🔍 Searching for: "$query"');
-    setState(() {
-      filteredUsers = allUsers
-          .where((u) => u['username'].toString().toLowerCase().contains(query.toLowerCase()))
-          .toList();
-      AppLogger.log('🔍 Found ${filteredUsers.length} results');
-    });
-  }
-
-  // -------------------- Send Message --------------------
-  void _sendMessage() {
-    String txt = _msgController.text.trim();
-    AppLogger.log('✉️ Sending message to $activeChatUser: "$txt"');
-    if (txt.isEmpty || activeChatUser.isEmpty) {
-      AppLogger.log('⚠️ Cannot send: empty text or no active chat user');
-      return;
-    }
-
-    var msgData = {
-      "from": currentUsername,
-      "to": activeChatUser,
-      "text": txt,
-      "timestamp": DateTime.now().millisecondsSinceEpoch
-    };
-
-    AppLogger.log('📤 Emitting chat_message: $msgData');
-    _socket?.emit('chat_message', msgData);
-
-    setState(() {
-      messages.add(msgData);
-      _msgController.clear();
-    });
-    AppLogger.log('✅ Message sent and added locally');
-  }
-
-  // -------------------- UI Helpers --------------------
-  void _showError(String msg) {
-    AppLogger.log('❌ Showing error: $msg');
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text(msg), backgroundColor: Colors.red)
-    );
-  }
-
-  // -------------------- Logging Toggle with Long Press (10 Sec) --------------------
-  void _startLoggingHold() {
-    AppLogger.log('🕒 Long press started on log button');
-    _loggingHoldTimer?.cancel();
-    _loggingHoldTimer = Timer(const Duration(seconds: 10), () async {
-      AppLogger.log('⏰ 10 seconds hold reached! Toggling logging mode.');
-      if (AppLogger.isEnabled) {
-        String logs = AppLogger.getLogs();
-        await Clipboard.setData(ClipboardData(text: logs));
-        AppLogger.log('📋 Logs copied to clipboard (${logs.length} chars)');
-        await AppLogger.disable();
-      } else {
-        await AppLogger.enable();
-      }
-      setState(() {
-        _isLoggingEnabled = AppLogger.isEnabled;
-        _isLoggingHoldActive = false;
-      });
-    });
-    setState(() {
-      _isLoggingHoldActive = true;
-    });
-  }
-
-  void _cancelLoggingHold() {
-    if (_loggingHoldTimer != null && _loggingHoldTimer!.isActive) {
-      _loggingHoldTimer!.cancel();
-      AppLogger.log('🕒 Long press cancelled before 10 seconds');
-    }
-    setState(() {
-      _isLoggingHoldActive = false;
-    });
-  }
-
-  // -------------------- Exit Application (App Tap Action) --------------------
-  void _exitApp() {
-    AppLogger.log('🚪 User tapped exit button -> Closing app');
-    SystemNavigator.pop(); // خروج از برنامه بدون خروج از حساب
-  }
-
-  // -------------------- Build --------------------
   @override
   Widget build(BuildContext context) {
-    if (currentUsername == null) {
-      AppLogger.log('🖥️ Building auth view');
-      return _buildAuthView();
+    return const Scaffold(
+      body: Center(child: CircularProgressIndicator()),
+    );
+  }
+}
+
+// ==================== صفحه ورود و ثبت‌نام ====================
+class AuthScreen extends StatefulWidget {
+  const AuthScreen({super.key});
+
+  @override
+  State<AuthScreen> createState() => _AuthScreenState();
+}
+
+class _AuthScreenState extends State<AuthScreen> {
+  bool isLoginMode = true;
+  final _userController = TextEditingController();
+  final _passController = TextEditingController();
+  final _passConfirmController = TextEditingController();
+  String errorMessage = '';
+  bool isLoading = false;
+
+  Future<void> _submit() async {
+    final user = _userController.text.trim();
+    final pass = _passController.text.trim();
+
+    setState(() => errorMessage = '');
+
+    if (user.isEmpty || pass.isEmpty) {
+      setState(() => errorMessage = 'لطفاً تمامی فیلدها را پر کنید');
+      return;
     }
-    AppLogger.log('🖥️ Building main view, activeChatUser: "$activeChatUser"');
-    return activeChatUser.isEmpty ? _buildUserListView() : _buildChatRoomView();
+
+    if (!isLoginMode) {
+      final passConfirm = _passConfirmController.text.trim();
+      if (pass.length < 5) {
+        setState(() => errorMessage = 'رمز عبور باید حداقل ۵ کاراکتر باشد');
+        return;
+      }
+      if (pass != passConfirm) {
+        setState(() => errorMessage = 'رمز عبور و تکرار آن یکسان نیستند');
+        return;
+      }
+    }
+
+    setState(() => isLoading = true);
+    final endpoint = isLoginMode ? '/api/login' : '/api/signup';
+
+    try {
+      final response = await http.post(
+        Uri.parse('$baseUrl$endpoint'),
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({'username': user, 'password': pass}),
+      );
+
+      if (response.statusCode == 200 || response.statusCode == 201) {
+        final prefs = await SharedPreferences.getInstance();
+        await prefs.setString('username', user);
+        if (mounted) {
+          Navigator.pushReplacement(
+            context,
+            MaterialPageRoute(builder: (_) => MainChatScreen(currentUsername: user)),
+          );
+        }
+      } else {
+        final data = jsonDecode(response.body);
+        setState(() {
+          errorMessage = data['error'] ?? (isLoginMode ? 'اطلاعات ورود اشتباه است' : 'نام کاربری قبلاً انتخاب شده است');
+        });
+      }
+    } catch (e) {
+      setState(() => errorMessage = 'خطا در ارتباط با سرور');
+    } finally {
+      setState(() => isLoading = false);
+    }
   }
 
-  // ============================ UI Sections ============================
-  Widget _buildAuthView() {
+  @override
+  Widget build(BuildContext context) {
     return Scaffold(
       body: Center(
         child: SingleChildScrollView(
-          padding: const EdgeInsets.all(24.0),
-          child: Card(
-            elevation: 8,
-            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-            color: const Color(0xFF1E1E1E),
-            child: Padding(
-              padding: const EdgeInsets.all(24.0),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Text(
-                    isLoginMode ? "ورود به حساب" : "ثبت نام کاربر جدید",
-                    style: const TextStyle(fontSize: 22, fontWeight: FontWeight.bold, color: Colors.blueAccent)
-                  ),
-                  const SizedBox(height: 20),
+          padding: const EdgeInsets.all(24),
+          child: Container(
+            constraints: const BoxConstraints(maxWidth: 360),
+            padding: const EdgeInsets.all(24),
+            decoration: BoxDecoration(
+              color: const Color(0xFF1C1C1C),
+              borderRadius: BorderRadius.circular(16),
+            ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  isLoginMode ? 'ورود به حساب' : 'ثبت نام کاربر جدید',
+                  style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold, color: Color(0xFF4F8CFF)),
+                ),
+                const SizedBox(height: 20),
+                TextField(
+                  controller: _userController,
+                  decoration: const InputDecoration(labelText: 'نام کاربری', border: OutlineInputBorder()),
+                ),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: _passController,
+                  obscureText: true,
+                  decoration: const InputDecoration(labelText: 'رمز عبور', border: OutlineInputBorder()),
+                ),
+                if (!isLoginMode) ...[
+                  const SizedBox(height: 12),
                   TextField(
-                    controller: _userController,
-                    decoration: const InputDecoration(labelText: "نام کاربری", border: OutlineInputBorder()),
-                  ),
-                  const SizedBox(height: 16),
-                  TextField(
-                    controller: _passController,
+                    controller: _passConfirmController,
                     obscureText: true,
-                    decoration: const InputDecoration(labelText: "رمز عبور", border: OutlineInputBorder()),
+                    decoration: const InputDecoration(labelText: 'تکرار رمز عبور', border: OutlineInputBorder()),
                   ),
-                  const SizedBox(height: 24),
-                  ElevatedButton(
-                    style: ElevatedButton.styleFrom(
-                      minimumSize: const Size.fromHeight(50),
-                      backgroundColor: Colors.blueAccent
-                    ),
-                    onPressed: _authAction,
-                    child: Text(isLoginMode ? "ورود" : "ساخت حساب"),
-                  ),
-                  TextButton(
-                    onPressed: () => setState(() => isLoginMode = !isLoginMode),
-                    child: Text(isLoginMode ? "حساب ندارید؟ ثبت نام کنید" : "قبلاً ثبت نام کردید؟ وارد شوید"),
-                  )
                 ],
-              ),
+                if (errorMessage.isNotEmpty) ...[
+                  const SizedBox(height: 10),
+                  Text(errorMessage, style: const TextStyle(color: Colors.red, fontSize: 13)),
+                ],
+                const SizedBox(height: 20),
+                SizedBox(
+                  width: double.infinity,
+                  height: 46,
+                  child: ElevatedButton(
+                    onPressed: isLoading ? null : _submit,
+                    style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF4F8CFF)),
+                    child: isLoading
+                        ? const CircularProgressIndicator(color: Colors.white)
+                        : Text(isLoginMode ? 'ورود' : 'ثبت نام', style: const TextStyle(fontWeight: FontWeight.bold)),
+                  ),
+                ),
+                TextButton(
+                  onPressed: () {
+                    setState(() {
+                      isLoginMode = !isLoginMode;
+                      errorMessage = '';
+                    });
+                  },
+                  child: Text(
+                    isLoginMode ? 'حساب ندارید؟ ثبت نام کنید' : 'قبلاً ثبت نام کردید؟ وارد شوید',
+                    style: const TextStyle(color: Color(0xFF4F8CFF)),
+                  ),
+                )
+              ],
             ),
           ),
         ),
       ),
     );
   }
+}
 
-  Widget _buildUserListView() {
+// ==================== صفحه اصلی (لیست چت‌ها و گروه‌ها) ====================
+class MainChatScreen extends StatefulWidget {
+  final String currentUsername;
+  const MainChatScreen({super.key, required.this.currentUsername});
+
+  @override
+  State<MainChatScreen> createState() => _MainChatScreenState();
+}
+
+class _MainChatScreenState extends State<MainChatScreen> {
+  WebSocketChannel? channel;
+  Timer? pollTimer;
+  List<dynamic> users = [];
+  List<dynamic> groups = [];
+  String searchQuery = '';
+  bool isConnected = false;
+
+  // ذخیره اطلاعات آخرین پیام‌ها و تعداد خوانده‌نشده‌ها
+  Map<String, String> lastMessages = {};
+  Map<String, int> unreadCounts = {};
+
+  @override
+  void initState() {
+    super.initState();
+    _loadStoredChatData();
+    _connectWebSocket();
+    _fetchData();
+    pollTimer = Timer.periodic(const Duration(seconds: 5), (_) => _fetchData());
+  }
+
+  // بارگیری داده‌های ذخیره‌شده
+  Future<void> _loadStoredChatData() async {
+    final prefs = await SharedPreferences.getInstance();
+    final rawLastMsgs = prefs.getString('last_messages_${widget.currentUsername}');
+    final rawUnread = prefs.getString('unread_counts_${widget.currentUsername}');
+
+    setState(() {
+      if (rawLastMsgs != null) {
+        lastMessages = Map<String, String>.from(jsonDecode(rawLastMsgs));
+      }
+      if (rawUnread != null) {
+        unreadCounts = Map<String, int>.from(jsonDecode(rawUnread));
+      }
+    });
+  }
+
+  // ذخیره‌سازی داده‌های چت در حافظه گوشی
+  Future<void> _saveChatData() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString('last_messages_${widget.currentUsername}', jsonEncode(lastMessages));
+    await prefs.setString('unread_counts_${widget.currentUsername}', jsonEncode(unreadCounts));
+  }
+
+  void _connectWebSocket() {
+    try {
+      channel = WebSocketChannel.connect(Uri.parse(wsUrl));
+      channel!.sink.add(jsonEncode({
+        'type': 'register',
+        'username': widget.currentUsername,
+        'lastMessageTimestamp': 0,
+      }));
+
+      setState(() => isConnected = true);
+
+      channel!.stream.listen(
+        (event) {
+          final data = jsonDecode(event);
+          if (data['type'] == 'chat_message') {
+            final String text = data['text'] ?? '';
+            final String? sender = data['from'];
+            final String? groupId = data['groupId']?.toString();
+
+            // تعیین شناسه چت (اگر گروهی باشد شناسه گروه وگرنه نام فرستنده)
+            final String chatKey = groupId ?? sender ?? '';
+
+            if (chatKey.isNotEmpty && sender != widget.currentUsername) {
+              setState(() {
+                lastMessages[chatKey] = text;
+                unreadCounts[chatKey] = (unreadCounts[chatKey] ?? 0) + 1;
+              });
+              _saveChatData();
+            }
+          }
+        },
+        onDone: () {
+          setState(() => isConnected = false);
+          Future.delayed(const Duration(seconds: 3), _connectWebSocket);
+        },
+        onError: (_) {
+          setState(() => isConnected = false);
+        },
+      );
+    } catch (_) {
+      setState(() => isConnected = false);
+    }
+  }
+
+  Future<void> _fetchData() async {
+    try {
+      final resUsers = await http.get(Uri.parse('$baseUrl/api/users'));
+      if (resUsers.statusCode == 200) {
+        final List list = jsonDecode(resUsers.body);
+        setState(() {
+          users = list.where((u) => u['username'] != widget.currentUsername).toList();
+        });
+      }
+
+      final resGroups = await http.get(Uri.parse('$baseUrl/api/groups?username=${widget.currentUsername}'));
+      if (resGroups.statusCode == 200) {
+        setState(() {
+          groups = jsonDecode(resGroups.body);
+        });
+      }
+    } catch (e) {
+      // دریافت خطا
+    }
+  }
+
+  // پاک کردن تعداد پیام‌های خوانده‌نشده هنگام ورود به چت
+  void _markAsRead(String key) {
+    if (unreadCounts.containsKey(key) && unreadCounts[key]! > 0) {
+      setState(() {
+        unreadCounts[key] = 0;
+      });
+      _saveChatData();
+    }
+  }
+
+  // بروزرسانی آخرین پیام ارسالی توسط خود کاربر
+  void _updateLastMessageLocally(String key, String text) {
+    setState(() {
+      lastMessages[key] = text;
+    });
+    _saveChatData();
+  }
+
+  void _confirmLogout() {
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('خروج از حساب'),
+        content: const Text('آیا مطمئن هستید که می‌خواهید از حساب کاربری خود خارج شوید؟'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('انصراف', style: TextStyle(color: Colors.grey)),
+          ),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(backgroundColor: Colors.red),
+            onPressed: () async {
+              Navigator.pop(ctx);
+              channel?.sink.close();
+              pollTimer?.cancel();
+              final prefs = await SharedPreferences.getInstance();
+              await prefs.remove('username');
+              if (mounted) {
+                Navigator.pushReplacement(
+                  context,
+                  MaterialPageRoute(builder: (_) => const AuthScreen()),
+                );
+              }
+            },
+            child: const Text('خروج', style: TextStyle(color: Colors.white)),
+          ),
+        ],
+      ),
+    );
+  }
+
+  @override
+  void dispose() {
+    channel?.sink.close();
+    pollTimer?.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final filteredGroups = groups.where((g) => (g['name'] ?? '').toLowerCase().contains(searchQuery.toLowerCase())).toList();
+    final filteredUsers = users.where((u) => (u['username'] ?? '').toLowerCase().contains(searchQuery.toLowerCase())).toList();
+
     return Scaffold(
       appBar: AppBar(
-        title: isConnected
-            ? const Text("هون")
-            : const Text("در حال اتصال...",
-                style: TextStyle(color: Colors.orange, fontSize: 12, fontWeight: FontWeight.bold)),
-        actions: [
-          GestureDetector(
-            onTap: _exitApp, // ضربه زدن: خروج از برنامه
-            onLongPressStart: (_) => _startLoggingHold(), // نگه داشتن ۱۰ ثانیه: لاگ‌گیری
-            onLongPressEnd: (_) => _cancelLoggingHold(),
-            onLongPressCancel: _cancelLoggingHold,
-            child: AnimatedContainer(
-              duration: const Duration(milliseconds: 300),
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-              margin: const EdgeInsets.only(right: 8),
+        title: Row(
+          children: [
+            Container(
+              width: 10,
+              height: 10,
               decoration: BoxDecoration(
-                color: _isLoggingHoldActive
-                    ? (_isLoggingEnabled ? Colors.red : Colors.orange)
-                    : (_isLoggingEnabled ? Colors.green.withOpacity(0.3) : Colors.transparent),
-                borderRadius: BorderRadius.circular(8),
-                border: Border.all(
-                  color: _isLoggingHoldActive
-                      ? (_isLoggingEnabled ? Colors.red : Colors.orange)
-                      : (_isLoggingEnabled ? Colors.green : Colors.grey),
-                  width: 2,
-                ),
-              ),
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Icon(
-                    Icons.exit_to_app,
-                    color: _isLoggingHoldActive
-                        ? Colors.white
-                        : (_isLoggingEnabled ? Colors.green : Colors.grey),
-                    size: 24,
-                  ),
-                  if (_isLoggingHoldActive)
-                    Padding(
-                      padding: const EdgeInsets.only(left: 4),
-                      child: Icon(
-                        _isLoggingEnabled ? Icons.check_circle : Icons.copy,
-                        color: Colors.white,
-                        size: 18,
-                      ),
-                    ),
-                ],
+                color: isConnected ? Colors.green : Colors.red,
+                shape: BoxShape.circle,
               ),
             ),
+            const SizedBox(width: 8),
+            Text(isConnected ? 'متصل' : 'در حال اتصال...', style: const TextStyle(fontSize: 14)),
+          ],
+        ),
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.group_add),
+            tooltip: 'گروه جدید',
+            onPressed: () => _showCreateGroupModal(context),
+          ),
+          IconButton(
+            icon: const Icon(Icons.logout, color: Colors.redAccent),
+            tooltip: 'خروج',
+            onPressed: _confirmLogout,
           ),
         ],
       ),
       body: Column(
         children: [
           Padding(
-            padding: const EdgeInsets.all(12.0),
+            padding: const EdgeInsets.all(12),
             child: TextField(
-              controller: _searchController,
-              onChanged: _searchUser,
-              decoration: const InputDecoration(
-                hintText: "جستجوی کاربر با آیدی...",
-                prefixIcon: Icon(Icons.search),
-                border: OutlineInputBorder(borderRadius: BorderRadius.all(Radius.circular(12))),
+              onChanged: (val) => setState(() => searchQuery = val),
+              decoration: InputDecoration(
+                hintText: 'جستجو در گفتگوها و گروه‌ها...',
+                prefixIcon: const Icon(Icons.search),
+                contentPadding: const EdgeInsets.symmetric(horizontal: 16),
+                border: OutlineInputBorder(borderRadius: BorderRadius.circular(25)),
+                filled: true,
+                fillColor: const Color(0xFF161616),
               ),
             ),
           ),
           Expanded(
-            child: ListView.builder(
-              itemCount: filteredUsers.length,
-              itemBuilder: (context, index) {
-                var user = filteredUsers[index];
-                return ListTile(
-                  leading: CircleAvatar(
-                    backgroundColor: user['is_online'] ? Colors.green : Colors.grey,
-                    child: Text(user['username'][0].toString().toUpperCase()),
-                  ),
-                  title: Text(user['username']),
-                  subtitle: Text(
-                    user['is_online'] ? "آنلاین" : "آفلاین",
-                    style: TextStyle(color: user['is_online'] ? Colors.green : Colors.grey)
-                  ),
-                  onTap: () {
-                    AppLogger.log('👤 Tapped on user ${user['username']}');
-                    setState(() => activeChatUser = user['username']);
-                  },
-                );
-              },
+            child: ListView(
+              children: [
+                // لیست گروه‌ها
+                ...filteredGroups.map((g) {
+                  final String gId = g['id'].toString();
+                  final int unread = unreadCounts[gId] ?? 0;
+                  final String? lastMsg = lastMessages[gId];
+
+                  return ListTile(
+                    leading: const CircleAvatar(backgroundColor: Color(0xFF4F8CFF), child: Icon(Icons.group, color: Colors.white)),
+                    title: Text(g['name'] ?? ''),
+                    subtitle: Text(
+                      lastMsg ?? '${g['memberCount']} عضو، ${g['onlineCount']} آنلاین',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        color: lastMsg != null ? Colors.white70 : Colors.grey,
+                        fontSize: 13,
+                      ),
+                    ),
+                    trailing: unread > 0
+                        ? Container(
+                            padding: const EdgeInsets.all(6),
+                            decoration: const BoxDecoration(
+                              color: Color(0xFF4F8CFF),
+                              shape: BoxShape.circle,
+                            ),
+                            child: Text(
+                              '$unread',
+                              style: const TextStyle(color: Colors.white, fontSize: 11, fontWeight: FontWeight.bold),
+                            ),
+                          )
+                        : null,
+                    onTap: () async {
+                      _markAsRead(gId);
+                      await Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                          builder: (_) => ChatRoomScreen(
+                            currentUsername: widget.currentUsername,
+                            groupId: gId,
+                            title: g['name'],
+                            onNewMessageSent: (txt) => _updateLastMessageLocally(gId, txt),
+                          ),
+                        ),
+                      );
+                      _fetchData();
+                    },
+                  );
+                }),
+
+                // لیست کاربران (چت شخصی)
+                ...filteredUsers.map((u) {
+                  final String username = u['username'];
+                  final int unread = unreadCounts[username] ?? 0;
+                  final String? lastMsg = lastMessages[username];
+
+                  return ListTile(
+                    leading: CircleAvatar(
+                      backgroundColor: const Color(0xFF2F5FCC),
+                      child: Text(username[0].toUpperCase()),
+                    ),
+                    title: Text(username),
+                    subtitle: Text(
+                      lastMsg ?? (u['is_online'] == true ? 'آنلاین' : 'آفلاین'),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        color: lastMsg != null
+                            ? Colors.white70
+                            : (u['is_online'] == true ? Colors.green : Colors.grey),
+                        fontSize: 12,
+                      ),
+                    ),
+                    trailing: unread > 0
+                        ? Container(
+                            padding: const EdgeInsets.all(6),
+                            decoration: const BoxDecoration(
+                              color: Color(0xFF4F8CFF),
+                              shape: BoxShape.circle,
+                            ),
+                            child: Text(
+                              '$unread',
+                              style: const TextStyle(color: Colors.white, fontSize: 11, fontWeight: FontWeight.bold),
+                            ),
+                          )
+                        : null,
+                    onTap: () async {
+                      _markAsRead(username);
+                      await Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                          builder: (_) => ChatRoomScreen(
+                            currentUsername: widget.currentUsername,
+                            peerUsername: username,
+                            title: username,
+                            onNewMessageSent: (txt) => _updateLastMessageLocally(username, txt),
+                          ),
+                        ),
+                      );
+                      _fetchData();
+                    },
+                  );
+                }),
+              ],
             ),
           ),
         ],
@@ -664,65 +566,217 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
     );
   }
 
-  Widget _buildChatRoomView() {
-    var chatMessages = messages.where((m) =>
-      (m['from'] == currentUsername && m['to'] == activeChatUser) ||
-      (m['from'] == activeChatUser && m['to'] == currentUsername)
-    ).toList();
-
-    return Scaffold(
-      appBar: AppBar(
-        title: Text("گفتگو با $activeChatUser"),
-        leading: IconButton(
-          icon: const Icon(Icons.arrow_back),
-          onPressed: () {
-            AppLogger.log('⬅️ Leaving chat with $activeChatUser');
-            setState(() => activeChatUser = "");
-          },
+  void _showCreateGroupModal(BuildContext context) {
+    final nameController = TextEditingController();
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      builder: (ctx) => Padding(
+        padding: EdgeInsets.only(bottom: MediaQuery.of(ctx).viewInsets.bottom, top: 20, left: 20, right: 20),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Text('ساخت گروه جدید', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+            const SizedBox(height: 15),
+            TextField(controller: nameController, decoration: const InputDecoration(labelText: 'نام گروه')),
+            const SizedBox(height: 20),
+            ElevatedButton(
+              style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF4F8CFF)),
+              onPressed: () async {
+                final name = nameController.text.trim();
+                if (name.isNotEmpty) {
+                  await http.post(
+                    Uri.parse('$baseUrl/api/groups/create'),
+                    headers: {'Content-Type': 'application/json'},
+                    body: jsonEncode({'username': widget.currentUsername, 'name': name}),
+                  );
+                  Navigator.pop(ctx);
+                  _fetchData();
+                }
+              },
+              child: const Text('ایجاد گروه'),
+            ),
+            const SizedBox(height: 20),
+          ],
         ),
       ),
+    );
+  }
+}
+
+// ==================== صفحه چت (شخصی و گروهی) ====================
+class ChatRoomScreen extends StatefulWidget {
+  final String currentUsername;
+  final String? peerUsername;
+  final String? groupId;
+  final String title;
+  final Function(String text)? onNewMessageSent;
+
+  const ChatRoomScreen({
+    super.key,
+    required.this.currentUsername,
+    this.peerUsername,
+    this.groupId,
+    required.this.title,
+    this.onNewMessageSent,
+  });
+
+  @override
+  State<ChatRoomScreen> createState() => _ChatRoomScreenState();
+}
+
+class _ChatRoomScreenState extends State<ChatRoomScreen> {
+  final List<dynamic> _messages = [];
+  final TextEditingController _msgController = TextEditingController();
+  WebSocketChannel? channel;
+
+  @override
+  void initState() {
+    super.initState();
+    _fetchHistory();
+    _connectWs();
+  }
+
+  void _connectWs() {
+    channel = WebSocketChannel.connect(Uri.parse(wsUrl));
+    channel!.stream.listen((event) {
+      final data = jsonDecode(event);
+      if (data['type'] == 'chat_message') {
+        if (mounted) {
+          setState(() {
+            _messages.add(data);
+          });
+          widget.onNewMessageSent?.call(data['text'] ?? '');
+        }
+      }
+    });
+  }
+
+  Future<void> _fetchHistory() async {
+    String url = '$baseUrl/api/messages?username=${widget.currentUsername}&limit=100';
+    if (widget.peerUsername != null) {
+      url += '&peer=${widget.peerUsername}';
+    } else if (widget.groupId != null) {
+      url += '&groupId=${widget.groupId}';
+    }
+
+    try {
+      final res = await http.get(Uri.parse(url));
+      if (res.statusCode == 200) {
+        final data = jsonDecode(res.body);
+        final List fetched = data['messages'] ?? [];
+        setState(() {
+          _messages.clear();
+          _messages.addAll(fetched);
+        });
+
+        // تنظیم آخرین پیام در صورت وجود تاریخچه
+        if (fetched.isNotEmpty) {
+          widget.onNewMessageSent?.call(fetched.last['text'] ?? '');
+        }
+      }
+    } catch (_) {}
+  }
+
+  void _sendMessage() {
+    final txt = _msgController.text.trim();
+    if (txt.isEmpty) return;
+
+    final msgData = {
+      'type': 'chat_message',
+      'text': txt,
+      if (widget.peerUsername != null) 'to': widget.peerUsername,
+      if (widget.groupId != null) 'groupId': widget.groupId,
+    };
+
+    channel?.sink.add(jsonEncode(msgData));
+
+    setState(() {
+      _messages.add({
+        'from': widget.currentUsername,
+        'text': txt,
+        'timestamp': DateTime.now().millisecondsSinceEpoch,
+      });
+    });
+
+    widget.onNewMessageSent?.call(txt);
+    _msgController.clear();
+  }
+
+  @override
+  void dispose() {
+    channel?.sink.close();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: Text(widget.title)),
       body: Column(
         children: [
           Expanded(
             child: ListView.builder(
               padding: const EdgeInsets.all(12),
-              itemCount: chatMessages.length,
-              itemBuilder: (context, index) {
-                var m = chatMessages[index];
-                bool isMe = m['from'] == currentUsername;
+              itemCount: _messages.length,
+              itemBuilder: (ctx, idx) {
+                final m = _messages[idx];
+                final isMe = m['from'] == widget.currentUsername;
+                final timeStr = m['timestamp'] != null
+                    ? intl.DateFormat('HH:mm').format(DateTime.fromMillisecondsSinceEpoch(m['timestamp']))
+                    : '';
+
                 return Align(
                   alignment: isMe ? Alignment.centerRight : Alignment.centerLeft,
                   child: Container(
                     margin: const EdgeInsets.symmetric(vertical: 4),
-                    padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                    padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
                     decoration: BoxDecoration(
-                      color: isMe ? Colors.blueAccent : Colors.grey[800],
-                      borderRadius: BorderRadius.circular(12),
+                      color: isMe ? const Color(0xFF2F5FCC) : const Color(0xFF262626),
+                      borderRadius: BorderRadius.only(
+                        topLeft: const Radius.circular(12),
+                        topRight: const Radius.circular(12),
+                        bottomLeft: Radius.circular(isMe ? 12 : 2),
+                        bottomRight: Radius.circular(isMe ? 2 : 12),
+                      ),
                     ),
-                    child: Text(m['text'] ?? "", style: const TextStyle(color: Colors.white)),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        if (!isMe && widget.groupId != null)
+                          Text(
+                            m['from'] ?? '',
+                            style: const TextStyle(color: Color(0xFF4F8CFF), fontSize: 11, fontWeight: FontWeight.bold),
+                          ),
+                        Text(m['text'] ?? '', style: const TextStyle(color: Colors.white)),
+                        const SizedBox(height: 2),
+                        Text(timeStr, style: const TextStyle(fontSize: 9, color: Colors.white54)),
+                      ],
+                    ),
                   ),
                 );
               },
             ),
           ),
-          Padding(
-            padding: const EdgeInsets.all(8.0),
+          Container(
+            padding: const EdgeInsets.all(8),
+            color: const Color(0xFF1C1C1C),
             child: Row(
               children: [
                 Expanded(
                   child: TextField(
                     controller: _msgController,
                     decoration: const InputDecoration(
-                      hintText: "تایپ پیام...",
-                      border: OutlineInputBorder()
+                      hintText: 'تایپ پیام...',
+                      border: InputBorder.none,
+                      contentPadding: EdgeInsets.symmetric(horizontal: 12),
                     ),
                   ),
                 ),
-                const SizedBox(width: 8),
                 IconButton(
-                  icon: const Icon(Icons.send, color: Colors.blueAccent),
+                  icon: const Icon(Icons.send, color: Color(0xFF4F8CFF)),
                   onPressed: _sendMessage,
-                )
+                ),
               ],
             ),
           )
